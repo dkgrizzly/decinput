@@ -2,99 +2,101 @@
 #include <string.h>
 #include <pico/stdlib.h>
 
-typedef struct mouse_status_s {
-    bool selftest_done;
-
-    uint8_t buttons_held;
-    uint8_t buttons_pressed;
-    uint8_t buttons_released;
-
-    uint8_t laststate;
-
-    int16_t dx;
-    int16_t dy;
-    
-    uint16_t baud;
-    uint8_t mode;
-
-    struct repeating_timer timer;
-} mouse_status_t;
+#include "mouse.h"
 
 mouse_status_t mouse_status;
 
+mouse_packet_t mp_queue[256];
+uint8_t mp_wrptr = 0;
+uint8_t mp_rdptr = 0;
+
+void mouse_packet_enqueue(int8_t x, int8_t y, uint8_t buttons) {
+    if(mp_wrptr+1 != mp_rdptr) {
+        mp_queue[mp_wrptr].x = x;
+        mp_queue[mp_wrptr].y = y;
+        mp_queue[mp_wrptr].buttons = buttons;
+        mp_wrptr++;
+    }
+}
+
+static inline void mouse_packet_dequeue() {
+    if(mp_rdptr != mp_wrptr) {
+        mouse_status.dx += mp_queue[mp_rdptr].x;
+        mouse_status.dy += mp_queue[mp_rdptr].y;
+        mouse_status.buttons = mp_queue[mp_rdptr].buttons;
+
+        mp_rdptr++;
+    }
+}
+
 static void mouse_report() {
-    uint8_t mx, my;
-    uint8_t ms = 0x00;
+    uint8_t mouse_x, mouse_y;
+    uint8_t mouse_s = 0x00;
+
+    mouse_packet_dequeue();
 
     // Translate X movement
     if(mouse_status.dx == 0) {
-        mx = 0;
+        mouse_x = 0;
     } else if(mouse_status.dx < -127) {
         // Send -127 to host, adjust local cursor difference.
         mouse_status.dx += 127;
-        mx = 0x7f;
-        ms |= 0x10;
+        mouse_x = 0x7f;
     } else if(mouse_status.dx > 127) {
         // Send +127 to host, adjust local cursor difference.
         mouse_status.dx -= 127;
-        mx = 0x7f;
+        mouse_x = 0x7f;
+        mouse_s |= 0x10;
     } else if(mouse_status.dx < 0) {
-        mx = 0 - mouse_status.dx;
-        ms |= 0x10;
+        mouse_x = ~mouse_status.dx;
         mouse_status.dx = 0;
     } else {
-        mx = mouse_status.dx;
+        mouse_x = mouse_status.dx;
+        mouse_s |= 0x10;
         mouse_status.dx = 0;
     }
 
     // Translate Y movement
     if(mouse_status.dy == 0) {
-        my = 0;
+        mouse_y = 0;
     } else if(mouse_status.dy < -127) {
         // Send -127 to host, adjust local cursor difference.
         mouse_status.dy += 127;
-        my = 0x7f;
-        ms |= 0x08;
+        mouse_y = 0x7f;
+        mouse_s |= 0x08;
     } else if(mouse_status.dy > 127) {
         // Send +127 to host, adjust local cursor difference.
         mouse_status.dy -= 127;
-        my = 0x7f;
+        mouse_y = 0x7f;
     } else if(mouse_status.dy < 0) {
-        my = 0 - mouse_status.dy;
-        ms |= 0x08;
+        mouse_y = ~mouse_status.dy;
+        mouse_s |= 0x08;
         mouse_status.dy = 0;
     } else {
-        my = mouse_status.dy;
+        mouse_y = mouse_status.dy;
         mouse_status.dy = 0;
     }
-    
-    // Handle button debouncing, make sure the host sees any pressing before the release is processed.
-    mouse_status.buttons_held |= mouse_status.buttons_pressed;
-    mouse_status.buttons_pressed = 0;
 
-    ms |= (mouse_status.buttons_held & 0x7);
-
-    mouse_status.buttons_held &= ~mouse_status.buttons_released;
-    mouse_status.buttons_released = 0;
+    mouse_s |= (mouse_status.buttons & 0x7);
 
     // In polled mode, always report.
     // In stream mode, only report if we have significant changes.
     if(mouse_status.mode == 'P')
-        ms |= 0x80;
-    else if(mx & 0x7E)
-        ms |= 0x80;
-    else if(my & 0x7E)
-        ms |= 0x80;
-    else if((mouse_status.laststate & 0x7) != (ms & 0x7))
-        ms |= 0x80;
+        mouse_s |= 0x80;
+    else if(mouse_x & 0x7E)
+        mouse_s |= 0x80;
+    else if(mouse_y & 0x7E)
+        mouse_s |= 0x80;
+    else if((mouse_status.laststate & 0x7) != (mouse_s & 0x7))
+        mouse_s |= 0x80;
 
-    mouse_status.laststate = ms;
+    mouse_status.laststate = mouse_s;
 
     // DEC Serial Mouse Packet
-    if(ms & 0x80) {
-        uart_putc_raw(uart1, ms);
-        uart_putc_raw(uart1, mx & 0x7f);
-        uart_putc_raw(uart1, my & 0x7f);
+    if(mouse_s & 0x80) {
+        uart_putc_raw(uart1, mouse_s);
+        uart_putc_raw(uart1, mouse_x & 0x7f);
+        uart_putc_raw(uart1, mouse_y & 0x7f);
     }
 }
 
@@ -108,9 +110,9 @@ static bool mouse_stream_callback(struct repeating_timer *t) {
 static void mouse_set_reportrate(uint rate) {
     cancel_repeating_timer(&mouse_status.timer);
 
-    if(rate == 120) {
+    if((mouse_status.baud == 9600) && (rate >= 120)) {
         add_repeating_timer_ms(-9, mouse_stream_callback, NULL, &mouse_status.timer);
-    } else if(rate == 72) {
+    } else if(rate >= 72) {
         add_repeating_timer_ms(-14, mouse_stream_callback, NULL, &mouse_status.timer);
     } else {
         add_repeating_timer_ms(-18, mouse_stream_callback, NULL, &mouse_status.timer);
@@ -131,9 +133,7 @@ static void mouse_selftest() {
     mouse_status.dx = 0;
     mouse_status.dy = 0;
     mouse_status.laststate = 0;
-    mouse_status.buttons_released = 0;
-    mouse_status.buttons_pressed = 0;
-    mouse_status.buttons_held = 0;
+    mouse_status.buttons = 0;
 
     // Drain FIFO
     while(uart_is_readable(uart1)) {
@@ -181,9 +181,7 @@ void mouse_dowork() {
                 break;
             case 'M':
                 // Change report rate to ~120/s
-                if(mouse_status.baud == 9600) {
-                    mouse_set_reportrate(120);
-                }
+                mouse_set_reportrate(120);
                 break;
             case 'P':
                 // Poll Read
@@ -210,8 +208,9 @@ void mouse_dowork() {
 
     switch(mouse_status.mode) {
     case 'P':
-        mouse_report();
         mouse_status.mode = 'D';
+    case 'R':
+        mouse_report();
         break;
     case 'T':
         mouse_selftest();
