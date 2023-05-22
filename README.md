@@ -17,7 +17,11 @@ Connections:
 + Ground - VAX Mouse Port Pin 1 / Alpha Pins 1,5,8,9,15
 + +5V - VAX Mouse Port Pin 5 / Alpha Pin 13
 
+VAX Keyboard Pinout is a RJ-9 with the pins up looking into the port Pin 1 is to the left.
+VAX Mouse Pinout is a MiniDIN-7.
+Alpha Pinout is given for using with a DEC 3000 M300x's D-SUB 15 Keyboard/Mouse connector.
+
 Be aware that +/-12V are present on the mouse and keyboard connectors!
-You may need to connect the DEC Mouse pin 7 to ground to tell the host computer/terminal a mouse is connected.
+You may need to connect the VAX Mouse Pin 7 to ground to tell the host computer/terminal a mouse is connected.
 
 The foundations are in place to support the DEC Tablet protocol, but a TinyUSB driver would need to be written for the USB Tablet.
